@@ -41,7 +41,7 @@ from collections import deque
 from html.parser import HTMLParser
 
 TOOL_ID = "tool-leira-job-fit-tailor-s56adxsn"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 EM_DASH = "\u2014"
 
 MANIFEST = {

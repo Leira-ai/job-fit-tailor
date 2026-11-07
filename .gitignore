@@ -3,3 +3,6 @@
 __pycache__/
 *.egg-info/
 *.pyc
+
+# Built executa binary artifacts (rebuild with PyInstaller, see README)
+executas/job-fit-tailor/dist/
