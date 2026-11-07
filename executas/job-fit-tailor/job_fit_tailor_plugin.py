@@ -15,16 +15,33 @@ Protocol: JSON-RPC 2.0 over stdio, line-delimited. Logs go to stderr,
 protocol traffic to stdout. Sampling (host LLM via reverse RPC) is used
 when the host negotiated protocol v2 and injected a sampling_token in
 the invoke context; otherwise a deterministic local fallback runs.
+
+v2 inputs: the CV may arrive as an uploaded file (cv_file_base64 plus
+cv_filename, PDF/DOCX/TXT/MD) instead of pasted text, and the job ad
+may arrive as a link (job_url) that the plugin fetches and reduces to
+text. Pasted text always wins over the file or the link. The result
+echoes the exact texts analyzed plus extraction metadata, so the user
+can inspect and correct them before trusting the analysis.
+
+Main-loop contract: the loop runs until stdin EOF and answers every
+request in order. JSON-RPC notifications (frames without an id) are
+never answered; answering them emits a spurious id:null frame that
+shifts response pairing in bridges that read frames in order.
 """
 
+import base64
+import io
 import json
 import re
 import sys
+import urllib.error
+import urllib.request
 import uuid
 from collections import deque
+from html.parser import HTMLParser
 
 TOOL_ID = "tool-leira-job-fit-tailor-s56adxsn"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 EM_DASH = "\u2014"
 
 MANIFEST = {
@@ -39,45 +56,85 @@ MANIFEST = {
         {
             "name": "analyze_job_fit",
             "description": (
-                "Analyze how well a CV fits one job ad. Returns a grade and "
-                "score with matched evidence quoted from the CV, an honest "
-                "gap list, a tailored CV built only from facts in the CV, "
-                "an auditable change log, a cover note, five likely "
-                "interview questions, and ATS keywords split into present "
-                "and missing."
+                "Analyze how well a CV fits one job ad. The CV can be "
+                "pasted text or an uploaded file (PDF, DOCX, TXT, MD) sent "
+                "as cv_file_base64 plus cv_filename; the ad can be pasted "
+                "text or a job_url the tool fetches and reduces to text. "
+                "Returns a grade and score with matched evidence quoted "
+                "from the CV, an honest gap list, a tailored CV built only "
+                "from facts in the CV, an auditable change log, a cover "
+                "note, five likely interview questions, ATS keywords split "
+                "into present and missing, the exact texts that were "
+                "analyzed (cv_text_used, job_text_used), and extraction "
+                "metadata for both sides (cv_meta, job_meta)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "cv_text": {
                         "type": "string",
-                        "description": "The user's CV or resume, pasted as plain text.",
+                        "description": (
+                            "The user's CV or resume, pasted as plain text. "
+                            "Takes precedence over cv_file_base64."
+                        ),
+                    },
+                    "cv_file_base64": {
+                        "type": "string",
+                        "description": (
+                            "Base64-encoded CV file (PDF, DOCX, TXT, or MD), "
+                            "at most 3 MB after decoding. Used only when "
+                            "cv_text is empty."
+                        ),
+                    },
+                    "cv_filename": {
+                        "type": "string",
+                        "description": "Original name of the uploaded CV file; its extension selects the text extractor.",
+                    },
+                    "cv_source": {
+                        "type": "string",
+                        "enum": ["file", "paste", "saved"],
+                        "description": (
+                            "Where the CV came from, when the caller knows: "
+                            "a saved CV passed as cv_text should be marked "
+                            "saved. Defaults to paste for cv_text and file "
+                            "for cv_file_base64."
+                        ),
                     },
                     "job_text": {
                         "type": "string",
-                        "description": "One job ad, pasted as plain text.",
+                        "description": (
+                            "One job ad, pasted as plain text. Takes "
+                            "precedence over fetching job_url."
+                        ),
                     },
                     "job_url": {
                         "type": "string",
                         "description": (
-                            "Optional URL of the job ad. Recorded and echoed "
-                            "only; the ad is not fetched in v1."
+                            "URL of the job ad. When job_text is empty, the "
+                            "tool fetches this page and extracts the ad "
+                            "text; when job_text is present, the URL is "
+                            "recorded and echoed only."
                         ),
                     },
                     "scenario": {
                         "type": "string",
                         "enum": ["corporate", "startup", "internship"],
-                        "default": "corporate",
-                        "description": "Framing preset for tone and interview focus.",
+                        "description": (
+                            "Framing preset for tone and interview focus. "
+                            "When omitted, the tool picks one from the ad "
+                            "text (internship and student wording, startup "
+                            "wording, otherwise corporate)."
+                        ),
                     },
                     "language": {
                         "type": "string",
                         "enum": ["en", "id"],
-                        "default": "en",
-                        "description": "Language of the analysis: English or Indonesian.",
+                        "description": (
+                            "Language of the analysis: English or Indonesian. "
+                            "When omitted, the tool detects it from the texts."
+                        ),
                     },
                 },
-                "required": ["cv_text", "job_text"],
                 "additionalProperties": False,
             },
         }
@@ -395,6 +452,393 @@ def best_cv_line(cv_lines: list, terms: list) -> str:
     return best if best_hits > 0 else ""
 
 
+def extract_requirement_lines(job_lines: list, job_title: str) -> list:
+    """Requirement-looking lines of the ad (the v1 heuristic, shared)."""
+    req_lines = []
+    for line in job_lines:
+        low = line.lower()
+        if line == job_title:
+            continue
+        if 12 <= len(line) <= 220 and any(h in low for h in REQ_HINTS):
+            req_lines.append(line)
+    return req_lines[:14]
+
+
+# --------------------------------------------------------------------------
+# v2 input resolution: CV files, job URL fetching, extraction metadata.
+#
+# Everything in this section is deterministic and derived only from the
+# input bytes or text: metadata fields are labelled guesses, produced by
+# regexes and heuristics over the text itself, never invented.
+# --------------------------------------------------------------------------
+
+MAX_CV_FILE_BYTES = 3 * 1024 * 1024
+JOB_FETCH_MIN_CHARS = 600
+JOB_FETCH_PARTIAL_CHARS = 1500
+JOB_TEXT_CAP = 30000
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
+class InputError(Exception):
+    """A user-fixable input problem, with a stable error code."""
+
+    def __init__(self, code: str, message: str, partial_job_text: str = ""):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.partial_job_text = partial_job_text
+
+
+def extract_cv_file(data_b64: str, filename: str):
+    """Decode an uploaded CV file and extract its text.
+
+    Returns (text, warnings). Raises InputError on any problem the user
+    can fix (bad encoding, oversize, unsupported type, no text found).
+    """
+    name = (filename or "").strip()
+    try:
+        raw = base64.b64decode(data_b64 or "", validate=True)
+    except Exception:
+        raise InputError(
+            "cv_file_failed",
+            "The CV file could not be read (invalid base64 data). "
+            "Try uploading it again, or paste your CV text instead.")
+    if len(raw) > MAX_CV_FILE_BYTES:
+        raise InputError(
+            "cv_file_failed",
+            "The CV file is larger than 3 MB. Upload a smaller file, "
+            "or paste your CV text instead.")
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    warnings = []
+    if ext == "pdf":
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            raise InputError(
+                "cv_file_failed",
+                "PDF reading is not available in this environment. "
+                "Paste your CV text instead.")
+        try:
+            reader = PdfReader(io.BytesIO(raw))
+            parts = []
+            empty_pages = 0
+            for page in reader.pages:
+                piece = page.extract_text() or ""
+                if not piece.strip():
+                    empty_pages += 1
+                parts.append(piece)
+            text = "\n".join(parts)
+        except Exception as exc:
+            raise InputError(
+                "cv_file_failed",
+                f"The PDF could not be parsed ({exc}). "
+                "Try another file, or paste your CV text instead.")
+        if empty_pages:
+            warnings.append(
+                f"{empty_pages} PDF page(s) had no readable text; scanned "
+                "image pages cannot be read. Paste the missing parts if "
+                "the details look incomplete.")
+    elif ext == "docx":
+        try:
+            import docx
+        except ImportError:
+            raise InputError(
+                "cv_file_failed",
+                "DOCX reading is not available in this environment. "
+                "Paste your CV text instead.")
+        try:
+            document = docx.Document(io.BytesIO(raw))
+            parts = [p.text for p in document.paragraphs]
+            for table in document.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        parts.append(cell.text)
+            text = "\n".join(parts)
+        except Exception as exc:
+            raise InputError(
+                "cv_file_failed",
+                f"The DOCX file could not be parsed ({exc}). "
+                "Try another file, or paste your CV text instead.")
+    elif ext in ("txt", "md"):
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        raise InputError(
+            "cv_file_failed",
+            "Unsupported CV file type. Upload a PDF, DOCX, TXT, or MD "
+            "file, or paste your CV text instead.")
+    text = text.strip()
+    if not text:
+        raise InputError(
+            "cv_file_failed",
+            "No readable text was found in that file. If it is a scanned "
+            "image, paste your CV text instead.")
+    return text, warnings
+
+
+class _ReadabilityParser(HTMLParser):
+    """Small deterministic main-text extractor.
+
+    Drops script, style, and page chrome (nav, header, footer, aside,
+    form); prefers text inside article or main elements when that text
+    is substantial; block elements become line breaks so downstream
+    line-based heuristics keep working.
+    """
+
+    SKIP_TAGS = {"script", "style", "nav", "header", "footer", "aside",
+                 "form", "noscript", "iframe", "svg", "button", "select",
+                 "textarea", "title"}
+    BLOCK_TAGS = {"p", "div", "li", "br", "tr", "section", "article",
+                  "main", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol",
+                  "table", "blockquote", "pre"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.skip_depth = 0
+        self.main_depth = 0
+        self.all_parts: list = []
+        self.main_parts: list = []
+
+    def _emit(self, piece: str) -> None:
+        self.all_parts.append(piece)
+        if self.main_depth > 0:
+            self.main_parts.append(piece)
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP_TAGS:
+            self.skip_depth += 1
+            return
+        if self.skip_depth:
+            return
+        if tag in ("article", "main"):
+            self.main_depth += 1
+        if tag in self.BLOCK_TAGS:
+            self._emit("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP_TAGS:
+            if self.skip_depth > 0:
+                self.skip_depth -= 1
+            return
+        if self.skip_depth:
+            return
+        if tag in ("article", "main") and self.main_depth > 0:
+            self.main_depth -= 1
+        if tag in self.BLOCK_TAGS:
+            self._emit("\n")
+
+    def handle_data(self, data):
+        if self.skip_depth:
+            return
+        if data.strip():
+            self._emit(data)
+
+
+def _collapse_extracted(parts: list) -> str:
+    text = "".join(parts)
+    lines = []
+    for raw in text.splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def fetch_job_url(url: str) -> str:
+    """Fetch a job ad page and reduce it to plain text.
+
+    Returns whatever text could be extracted (possibly short); the
+    caller applies the length thresholds. Raises InputError with code
+    job_fetch_failed, carrying any partial text, when the fetch itself
+    fails.
+    """
+    if not re.match(r"^https?://", url or ""):
+        raise InputError(
+            "job_fetch_failed",
+            "That job link does not look like an http or https URL. "
+            "Check the link, or paste the ad text instead.")
+    req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read(2 * 1024 * 1024)
+            charset = resp.headers.get_content_charset() or "utf-8"
+    except Exception as exc:
+        raise InputError(
+            "job_fetch_failed",
+            f"The job ad could not be fetched from that link ({exc}). "
+            "The site may be blocking automated reads or the link may "
+            "be wrong. Paste the ad text instead.",
+            partial_job_text="")
+    page = raw.decode(charset, errors="replace")
+    parser = _ReadabilityParser()
+    try:
+        parser.feed(page)
+    except Exception:
+        pass
+    main_text = _collapse_extracted(parser.main_parts)
+    all_text = _collapse_extracted(parser.all_parts)
+    text = main_text if len(main_text) >= JOB_FETCH_MIN_CHARS else all_text
+    return text[:JOB_TEXT_CAP]
+
+
+ID_MARKERS = {
+    "yang", "dan", "di", "untuk", "dengan", "adalah", "mahasiswa",
+    "pengalaman", "menguasai", "perusahaan", "atau", "ini", "itu",
+    "tidak", "dalam", "pada", "kami", "anda", "bekerja", "persyaratan",
+    "lulusan", "mampu", "seorang", "akan", "dari", "sebagai",
+}
+EN_MARKERS = {
+    "the", "and", "for", "with", "experience", "requirements", "you",
+    "our", "will", "work", "skills", "team", "who", "are", "have",
+    "from", "this", "your", "role", "job", "about", "years",
+}
+
+
+def detect_language(text: str) -> str:
+    words = re.findall(r"[a-z]+", text.lower())
+    id_hits = sum(1 for w in words if w in ID_MARKERS)
+    en_hits = sum(1 for w in words if w in EN_MARKERS)
+    return "id" if id_hits > en_hits else "en"
+
+
+def pick_scenario(job_text: str) -> str:
+    low = norm(job_text)
+    if any(k in low for k in ("internship", "magang", "mahasiswa",
+                              "student", "intern ", "program magang")):
+        return "internship"
+    if any(k in low for k in ("startup", "scale-up", "scale up",
+                              "seed stage", "early-stage", "early stage",
+                              "start-up")):
+        return "startup"
+    return "corporate"
+
+
+SECTION_HEADERS = {
+    "summary", "ringkasan", "profil", "profile", "experience",
+    "pengalaman", "education", "pendidikan", "projects", "proyek",
+    "skills", "keahlian", "keterampilan", "about", "tentang",
+    "objective", "career", "work experience", "riwayat",
+    "certifications", "sertifikasi", "languages", "bahasa",
+}
+
+DEGREE_RE = re.compile(
+    r"(bachelor|master|sarjana|diploma|ph\.?d|b\.sc|m\.sc|b\.eng|m\.eng|"
+    r"\bs1\b|\bs2\b|\bd3\b|\bd4\b|degree|associate)", re.IGNORECASE)
+
+
+def build_cv_meta(cv_text: str, source: str) -> dict:
+    lines = clean_lines(cv_text)
+    name_guess, title_guess = "", ""
+    if lines:
+        first = lines[0]
+        if (len(first) <= 50 and len(first.split()) <= 5 and "@" not in first
+                and first.lower().strip(":") not in SECTION_HEADERS):
+            name_guess = first
+    rest = lines[1:] if name_guess else lines
+    if rest:
+        second = rest[0]
+        if (len(second) <= 60 and "@" not in second
+                and not re.search(r"\d{3,}", second)
+                and second.lower().strip(":") not in SECTION_HEADERS):
+            title_guess = second
+    education_guess = ""
+    for line in lines:
+        if DEGREE_RE.search(line) and len(line) <= 140:
+            education_guess = line
+            break
+    if not education_guess:
+        for i, line in enumerate(lines[:-1]):
+            if line.lower().strip(":") in ("education", "pendidikan"):
+                education_guess = lines[i + 1][:140]
+                break
+    return {
+        "name_guess": name_guess,
+        "title_guess": title_guess,
+        "skills_found": find_skills(norm(cv_text)),
+        "education_guess": education_guess,
+        "char_count": len(cv_text),
+        "source": source,
+    }
+
+
+COMPANY_PATTERNS = [
+    r"^([A-Z][\w&.\-]*(?:\s+[A-Z][\w&.\-]*){0,3})\s+is hiring",
+    r"^(PT\s+[\w&.\-]*(?:\s+[\w&.\-]*){0,3}?)\s+(?:membuka|sedang|membuka lowongan)",
+    r"^([\w&.\-]*(?:\s+[\w&.\-]*){0,3})\s+(?:is looking|is seeking|seeks|looking for)\b",
+    r"(?:^|\s)at\s+([A-Z][\w&.\-]*(?:\s+[A-Z][\w&.\-]*){0,3})\s*[.!]",
+    r"^(PT\s+[A-Z][\w&.\-]*(?:\s+[A-Z][\w&.\-]*){0,2})",
+]
+
+LOCATION_WORDS = [
+    "remote", "hybrid", "work from home", "wfh", "onsite", "on-site",
+    "jakarta", "bogor", "depok", "tangerang", "bekasi", "bandung",
+    "surabaya", "yogyakarta", "semarang", "medan", "makassar",
+    "denpasar", "bali", "indonesia", "singapore", "malaysia",
+    "work from anywhere",
+]
+LOCATION_LINE_RE = re.compile(
+    r"(?:location|lokasi|based in|penempatan|located in)\s*[:\-]?\s*(.+)",
+    re.IGNORECASE)
+
+
+def build_job_meta(job_text: str, source: str, partial: bool,
+                   warning) -> dict:
+    lines = clean_lines(job_text)
+    title_guess = lines[0][:90] if lines else ""
+    company_guess = ""
+    for line in lines[:3]:
+        for pat in COMPANY_PATTERNS:
+            m = re.search(pat, line)
+            if m:
+                company_guess = m.group(1).strip(" ,")
+                break
+        if company_guess:
+            break
+    location_guess = ""
+    for line in lines:
+        m = LOCATION_LINE_RE.search(line)
+        if m and m.group(1).strip():
+            location_guess = m.group(1).strip()[:80]
+            break
+    if not location_guess:
+        low = job_text.lower()
+        for word in LOCATION_WORDS:
+            if re.search(r"(?<![a-z])" + re.escape(word) + r"(?![a-z])", low):
+                location_guess = word.title() if word not in (
+                    "remote", "hybrid", "wfh") else word.capitalize()
+                if word == "wfh":
+                    location_guess = "WFH"
+                break
+    req_lines = extract_requirement_lines(lines, title_guess)
+    skill_lines = []
+    job_skills = set(find_skills(norm(job_text)))
+    for line in lines:
+        if line == title_guess or line in req_lines:
+            continue
+        low = line.lower()
+        if 12 <= len(line) <= 220 and any(
+                re.search(r"(?<![a-z0-9])" + re.escape(sk) + r"(?![a-z0-9])",
+                          low) for sk in job_skills):
+            skill_lines.append(line)
+    requirements = []
+    for line in lines:
+        if line in req_lines or line in skill_lines:
+            if line not in requirements:
+                requirements.append(line)
+    return {
+        "title_guess": title_guess,
+        "company_guess": company_guess,
+        "location_guess": location_guess,
+        "requirements": requirements[:10],
+        "char_count": len(job_text),
+        "source": source,
+        "partial": bool(partial),
+        "warning": warning,
+    }
+
+
 def fallback_analyze(cv_text: str, job_text: str, scenario: str,
                       language: str, job_title: str) -> dict:
     s = STR[language]
@@ -409,14 +853,7 @@ def fallback_analyze(cv_text: str, job_text: str, scenario: str,
     missing_skills = [k for k in job_skills if canon(k) not in cv_skills]
 
     # Requirement lines from the ad.
-    req_lines = []
-    for line in job_lines:
-        low = line.lower()
-        if line == job_title:
-            continue
-        if 12 <= len(line) <= 220 and any(h in low for h in REQ_HINTS):
-            req_lines.append(line)
-    req_lines = req_lines[:14]
+    req_lines = extract_requirement_lines(job_lines, job_title)
 
     evidence, gaps = [], []
     total_w, hit_w = 0.0, 0.0
@@ -649,21 +1086,100 @@ def sampling_analyze(channel: Channel, context: dict, args: dict,
     return result
 
 
+JOB_PARTIAL_WARNING = {
+    "en": ("Only part of the job ad could be read from the link "
+           "(about {n} characters). Check the extracted text below and "
+           "paste the full ad if anything looks missing; this analysis "
+           "used only the text shown."),
+    "id": ("Hanya sebagian iklan yang terbaca dari tautan itu "
+           "(sekitar {n} karakter). Periksa teks hasil ekstraksi di "
+           "bawah dan tempel iklan lengkapnya bila ada yang hilang; "
+           "analisis ini hanya memakai teks yang ditampilkan."),
+}
+
+JOB_FETCH_FAILED_MSG = {
+    "en": ("The job ad could not be read from that link, so nothing was "
+           "analyzed. Open the link, copy the ad text, and paste it "
+           "instead."),
+    "id": ("Iklan lowongan tidak bisa dibaca dari tautan itu, jadi "
+           "tidak ada yang dianalisis. Buka tautannya, salin teks "
+           "iklannya, lalu tempel di sini."),
+}
+
+
 def analyze(channel: Channel, params: dict) -> dict:
     args_in = params.get("arguments") or {}
     context = params.get("context") or {}
+    warnings = []
+
+    # --- Resolve the CV: pasted text wins, then an uploaded file. ---
     cv_text = (args_in.get("cv_text") or "").strip()
-    job_text = (args_in.get("job_text") or "").strip()
-    if not cv_text or not job_text:
+    cv_source = ""
+    if cv_text:
+        hint = (args_in.get("cv_source") or "").strip()
+        cv_source = hint if hint in ("saved", "paste") else "paste"
+    elif args_in.get("cv_file_base64"):
+        try:
+            cv_text, file_warnings = extract_cv_file(
+                args_in.get("cv_file_base64") or "",
+                args_in.get("cv_filename") or "")
+        except InputError as exc:
+            return {"success": False, "error": exc.message,
+                    "error_code": exc.code}
+        warnings.extend(file_warnings)
+        cv_source = "file"
+    if not cv_text:
         return {"success": False,
-                "error": "cv_text and job_text are both required and must be non-empty."}
-    scenario = args_in.get("scenario") or "corporate"
-    if scenario not in ("corporate", "startup", "internship"):
-        scenario = "corporate"
-    language = args_in.get("language") or "en"
-    if language not in ("en", "id"):
-        language = "en"
+                "error": ("A CV is required: upload a CV file (PDF, DOCX, "
+                          "TXT, or MD) or paste the CV text."),
+                "error_code": "cv_required"}
+
+    # --- Resolve the job ad: pasted text wins, then fetch the link. ---
+    job_text = (args_in.get("job_text") or "").strip()
     job_url = (args_in.get("job_url") or "").strip()
+    job_source = ""
+    job_partial = False
+    if job_text:
+        job_source = "paste"
+    elif job_url:
+        try:
+            fetched = fetch_job_url(job_url)
+        except InputError as exc:
+            lang_hint = detect_language(exc.partial_job_text or "")
+            return {"success": False,
+                    "error": JOB_FETCH_FAILED_MSG[lang_hint],
+                    "error_code": "job_fetch_failed",
+                    "partial_job_text": exc.partial_job_text or ""}
+        fetched = fetched.strip()
+        if len(fetched) < JOB_FETCH_MIN_CHARS:
+            lang_hint = detect_language(fetched)
+            return {"success": False,
+                    "error": JOB_FETCH_FAILED_MSG[lang_hint],
+                    "error_code": "job_fetch_failed",
+                    "partial_job_text": fetched}
+        job_text = fetched
+        job_source = "url"
+    if not job_text:
+        return {"success": False,
+                "error": ("A job ad is required: paste a job link or "
+                          "paste the ad text."),
+                "error_code": "job_required"}
+
+    # --- Scenario and language: explicit wins, otherwise auto. ---
+    scenario = args_in.get("scenario") or ""
+    if scenario not in ("corporate", "startup", "internship"):
+        scenario = pick_scenario(job_text)
+    language = args_in.get("language") or ""
+    if language not in ("en", "id"):
+        language = detect_language(job_text + "\n" + cv_text)
+
+    # --- A short link extraction is flagged, never silently used. ---
+    job_warning = None
+    if job_source == "url" and len(job_text) < JOB_FETCH_PARTIAL_CHARS:
+        job_partial = True
+        job_warning = JOB_PARTIAL_WARNING[language].format(n=len(job_text))
+        warnings.append(job_warning)
+
     args = {"cv_text": cv_text, "job_text": job_text, "job_url": job_url,
             "scenario": scenario, "language": language}
 
@@ -682,6 +1198,9 @@ def analyze(channel: Channel, params: dict) -> dict:
         log(f"sampling path failed, using fallback: {exc!r}")
 
     result = scrub_obj(result)
+    cv_meta = build_cv_meta(cv_text, cv_source)
+    job_meta = scrub_obj(build_job_meta(job_text, job_source, job_partial,
+                                        job_warning))
     blocks = [{
         "type": "markdown",
         "text": (f"**Job Fit & Tailor: grade {result['grade']} "
@@ -711,6 +1230,11 @@ def analyze(channel: Channel, params: dict) -> dict:
         "language": language,
         "job_url": job_url or None,
         "engine": engine,
+        "cv_text_used": cv_text,
+        "job_text_used": job_text,
+        "cv_meta": cv_meta,
+        "job_meta": job_meta,
+        "warnings": scrub_obj(warnings),
         "_display": {"blocks": blocks},
     }
     return {"success": True, "data": data}
@@ -744,6 +1268,8 @@ def handle(channel: Channel, req: dict):
         if tool != "analyze_job_fit":
             return {"result": {"success": False, "error": f"unknown tool: {tool}"}}
         return {"result": analyze(channel, params)}
+    if method == "shutdown":
+        return {"result": {}}
     return {"error": {"code": -32601, "message": f"unknown method: {method}"}}
 
 
@@ -753,6 +1279,16 @@ def main() -> None:
         req = channel.read_msg()
         if req is None:
             break
+        if not isinstance(req, dict):
+            continue
+        if "id" not in req:
+            # JSON-RPC notification: never answer it. Replying emits a
+            # spurious id:null frame that shifts response pairing for
+            # bridges reading frames in order (the v1 harness bug).
+            # An "exit" notification ends the loop cleanly.
+            if req.get("method") == "exit":
+                break
+            continue
         try:
             payload = handle(channel, req)
         except Exception as exc:  # noqa: BLE001

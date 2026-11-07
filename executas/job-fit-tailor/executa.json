@@ -1,9 +1,9 @@
 {
   "slug": "job-fit-tailor",
   "name": "job-fit-tailor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "executa_type": "tool",
-  "description": "Scores a CV against one job ad and builds an honest, evidence-based application package (fit grade, gaps, tailored CV, cover note, interview questions).",
+  "description": "Scores a CV against one job ad and builds an honest, evidence-based application package (fit grade, gaps, tailored CV, cover note, interview questions). The CV can be an uploaded file (PDF, DOCX, TXT, MD) or pasted text; the job ad can be a pasted link the tool fetches itself or pasted text.",
   "enabled": true,
   "tool_id": "tool-leira-job-fit-tailor-s56adxsn",
   "type": "python"
