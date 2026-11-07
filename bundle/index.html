@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Job Fit &amp; Tailor</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script src="./app.js" type="module"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Job Fit &amp; Tailor</h1>
+      <p class="tagline">Score your CV against one job ad. Honest evidence, honest gaps, a tailored CV that never invents experience.</p>
+    </header>
+
+    <main>
+      <section class="card" id="form-card">
+        <label for="cv">Your CV (paste as plain text)</label>
+        <textarea id="cv" rows="9" placeholder="Paste your CV here..."></textarea>
+
+        <label for="job">The job ad (paste one ad)</label>
+        <textarea id="job" rows="9" placeholder="Paste the job ad here..."></textarea>
+
+        <label for="job-url">Job URL (optional, recorded only)</label>
+        <input id="job-url" type="url" placeholder="https://..." />
+
+        <div class="row">
+          <div class="field">
+            <label for="scenario">Scenario</label>
+            <select id="scenario">
+              <option value="corporate" selected>Corporate</option>
+              <option value="startup">Startup</option>
+              <option value="internship">Internship</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="language">Language</label>
+            <select id="language">
+              <option value="en" selected>English</option>
+              <option value="id">Bahasa Indonesia</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row actions">
+          <button id="analyze-btn" class="primary" type="button">Analyze fit</button>
+          <button id="sample-btn" type="button">Use sample data</button>
+        </div>
+        <p id="status" class="status">Ready.</p>
+      </section>
+
+      <section class="card" id="result" hidden>
+        <div id="grade-card" class="grade-card">
+          <div class="grade-letter" id="grade-letter">?</div>
+          <div>
+            <div class="grade-score" id="grade-score"></div>
+            <div class="grade-verdict" id="grade-verdict"></div>
+            <div class="grade-engine" id="grade-engine"></div>
+          </div>
+        </div>
+
+        <h2>Matched evidence</h2>
+        <ul id="evidence-list"></ul>
+
+        <h2>Honest gaps</h2>
+        <ul id="gaps-list"></ul>
+
+        <h2>ATS keywords</h2>
+        <p class="kw"><strong>In your CV:</strong> <span id="kw-present"></span></p>
+        <p class="kw"><strong>Missing:</strong> <span id="kw-missing"></span></p>
+
+        <h2>Tailored CV</h2>
+        <pre id="tailored-cv" class="doc"></pre>
+        <button id="copy-cv-btn" type="button">Copy tailored CV</button>
+
+        <h2>Change log</h2>
+        <ul id="changelog-list"></ul>
+
+        <h2>Cover note</h2>
+        <pre id="cover-note" class="doc"></pre>
+        <button id="copy-cover-btn" type="button">Copy cover note</button>
+
+        <h2>Likely interview questions</h2>
+        <ol id="questions-list"></ol>
+      </section>
+    </main>
+  </body>
+</html>

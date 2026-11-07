@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tool-leira-job-fit-tailor-s56adxsn"
+version = "0.1.0"
+description = "Executa for the job-fit-tailor Anna App"
+requires-python = ">=3.10"
+
+[project.scripts]
+"tool-leira-job-fit-tailor-s56adxsn" = "job_fit_tailor_plugin:main"
+
+[tool.setuptools]
+py-modules = ["job_fit_tailor_plugin"]

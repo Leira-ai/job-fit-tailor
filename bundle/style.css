@@ -1,0 +1,116 @@
+:root {
+  --ink: #1c2430;
+  --muted: #5b6572;
+  --line: #d8dee6;
+  --accent: #2563eb;
+  --accent-ink: #ffffff;
+  --good: #15803d;
+  --warn: #b45309;
+  --bad: #b91c1c;
+  --card-bg: #ffffff;
+  --page-bg: #f3f5f8;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 16px;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--ink);
+  background: var(--page-bg);
+}
+
+header h1 { margin: 0 0 4px; font-size: 22px; }
+.tagline { margin: 0 0 16px; color: var(--muted); font-size: 14px; line-height: 1.45; }
+
+main { display: flex; flex-direction: column; gap: 16px; max-width: 860px; margin: 0 auto; }
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 6px; }
+label:first-child { margin-top: 0; }
+
+textarea, input, select {
+  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+}
+textarea { resize: vertical; line-height: 1.45; }
+
+.row { display: flex; gap: 12px; flex-wrap: wrap; }
+.row .field { flex: 1 1 160px; }
+.row.actions { margin-top: 16px; }
+
+button {
+  font: inherit;
+  font-size: 14px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+button:disabled { opacity: 0.55; cursor: default; }
+
+.status { font-size: 13px; color: var(--muted); margin: 12px 0 0; }
+
+.grade-card {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 8px;
+}
+.grade-letter {
+  font-size: 44px;
+  font-weight: 800;
+  line-height: 1;
+  min-width: 56px;
+  text-align: center;
+}
+.grade-letter.g-good { color: var(--good); }
+.grade-letter.g-mid { color: var(--warn); }
+.grade-letter.g-bad { color: var(--bad); }
+.grade-score { font-size: 15px; font-weight: 700; }
+.grade-verdict { font-size: 14px; margin-top: 2px; }
+.grade-engine { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+h2 { font-size: 16px; margin: 20px 0 8px; }
+ul, ol { margin: 0; padding-left: 20px; font-size: 14px; line-height: 1.5; }
+li { margin-bottom: 6px; }
+.cv-line { color: var(--muted); display: block; font-size: 13px; }
+.tip { color: var(--muted); display: block; font-size: 13px; }
+.kw { font-size: 14px; margin: 4px 0; }
+
+pre.doc {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.5;
+  background: var(--page-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  max-height: 380px;
+  overflow: auto;
+}
+
+@media (max-width: 560px) {
+  body { padding: 10px; }
+  .grade-letter { font-size: 36px; min-width: 44px; }
+}

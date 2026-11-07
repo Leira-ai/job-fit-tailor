@@ -1,0 +1,5 @@
+.venv/
+.anna/
+__pycache__/
+*.egg-info/
+*.pyc
