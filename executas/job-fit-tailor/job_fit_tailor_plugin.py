@@ -41,7 +41,7 @@ from collections import deque
 from html.parser import HTMLParser
 
 TOOL_ID = "tool-leira-job-fit-tailor-s56adxsn"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 EM_DASH = "\u2014"
 
 MANIFEST = {
@@ -542,20 +542,22 @@ def extract_cv_file(data_b64: str, filename: str):
                 "image pages cannot be read. Paste the missing parts if "
                 "the details look incomplete.")
     elif ext == "docx":
+        # Stdlib-only DOCX reading: a .docx is a zip, the body text lives
+        # in word/document.xml as w:p paragraphs of w:t runs. Table cell
+        # paragraphs are w:p elements too, so document order is kept.
         try:
-            import docx
-        except ImportError:
-            raise InputError(
-                "cv_file_failed",
-                "DOCX reading is not available in this environment. "
-                "Paste your CV text instead.")
-        try:
-            document = docx.Document(io.BytesIO(raw))
-            parts = [p.text for p in document.paragraphs]
-            for table in document.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        parts.append(cell.text)
+            import zipfile
+            import xml.etree.ElementTree as ET
+            ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                xml_bytes = zf.read("word/document.xml")
+            root = ET.fromstring(xml_bytes)
+            parts = []
+            for para in root.iter("{%s}p" % ns["w"]):
+                line = "".join(
+                    node.text or "" for node in para.iter("{%s}t" % ns["w"]))
+                if line.strip():
+                    parts.append(line)
             text = "\n".join(parts)
         except Exception as exc:
             raise InputError(

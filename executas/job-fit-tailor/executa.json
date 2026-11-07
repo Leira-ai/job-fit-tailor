@@ -1,7 +1,7 @@
 {
   "slug": "job-fit-tailor",
   "name": "job-fit-tailor",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "executa_type": "tool",
   "description": "Scores a CV against one job ad and builds an honest, evidence-based application package (fit grade, gaps, tailored CV, cover note, interview questions). The CV can be an uploaded file (PDF, DOCX, TXT, MD) or pasted text; the job ad can be a pasted link the tool fetches itself or pasted text.",
   "enabled": true,
@@ -11,7 +11,19 @@
     "type": "binary",
     "binary_artifacts": {
       "linux-x86_64": {
-        "path": "dist/job-fit-tailor-{version}-linux-x86_64.tar.gz",
+        "path": "dist/job-fit-tailor-{version}-universal.tar.gz",
+        "entrypoint": "bin/job-fit-tailor"
+      },
+      "linux-aarch64": {
+        "path": "dist/job-fit-tailor-{version}-universal.tar.gz",
+        "entrypoint": "bin/job-fit-tailor"
+      },
+      "darwin-arm64": {
+        "path": "dist/job-fit-tailor-{version}-universal.tar.gz",
+        "entrypoint": "bin/job-fit-tailor"
+      },
+      "darwin-x86_64": {
+        "path": "dist/job-fit-tailor-{version}-universal.tar.gz",
         "entrypoint": "bin/job-fit-tailor"
       }
     }

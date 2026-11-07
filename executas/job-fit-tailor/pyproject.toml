@@ -4,12 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tool-leira-job-fit-tailor-s56adxsn"
-version = "0.3.0"
+version = "0.3.1"
 description = "Executa for the job-fit-tailor Anna App"
 requires-python = ">=3.10"
 dependencies = [
     "pypdf>=4.0",
-    "python-docx>=1.1",
 ]
 
 [project.scripts]
